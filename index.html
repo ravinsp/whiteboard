@@ -32,6 +32,7 @@
     position: fixed; margin: 0; padding: 0; border: 0; background: transparent;
     outline: 1px dashed #c4c4c4; outline-offset: 2px;
     resize: none; overflow: hidden; white-space: pre; min-width: 20px;
+    transform-origin: 0 0; /* scaled with the zoom level */
   }
 
   #help {
@@ -68,7 +69,8 @@
 
 <div id="help">
   <kbd>1–4</kbd> color · <kbd>R</kbd> rectangle · <kbd>E</kbd> eraser · <kbd>T</kbd> text (<kbd>Esc</kbd> done) · <kbd>A</kbd> arrow on last line ·
-  <kbd>Ctrl+Z</kbd>/<kbd>Y</kbd> undo/redo · <kbd>Ctrl+S</kbd> save PNG · <kbd>Del</kbd> clear · <kbd>?</kbd> help
+  <kbd>Ctrl+Z</kbd>/<kbd>Y</kbd> undo/redo · <kbd>Ctrl+S</kbd> save PNG · <kbd>Del</kbd> clear · <kbd>?</kbd> help<br>
+  <kbd>Ctrl+wheel</kbd> zoom · <kbd>Space+drag</kbd> pan
 </div>
 
 <script>
@@ -98,6 +100,11 @@ let hover = null;     // item under eraser cursor
 let mouse = null;     // last pointer position on canvas
 let pointerId = null; // the one pointer we track
 let lastTool = null; // tool behind the most recent action; A only works right after the pen
+// Items are stored in board coordinates. On screen: screenX = boardX * z + x (same for y)
+let view = loadView();
+let spaceDown = false; // Space held: dragging pans instead of drawing
+let panning = null;   // last screen point while panning
+const MIN_ZOOM = 0.1, MAX_ZOOM = 8;
 
 // ---------- toolbar ----------
 const swatchBox = document.getElementById('swatches');
@@ -122,6 +129,8 @@ function updateBar() {
                   : mode === 'eraser' ? `url("data:image/svg+xml,${ring}") 10 10, cell`
                   : mode === 'rect' ? 'crosshair'
                   : 'text';
+  if (panning) cv.style.cursor = 'grabbing';
+  else if (spaceDown) cv.style.cursor = 'grab';
 }
 
 function setMode(m) {
@@ -171,6 +180,45 @@ function save() {
 function load() {
   try { return JSON.parse(localStorage.getItem('wb-items')) || []; } catch (e) { return []; }
 }
+function saveView() {
+  try { localStorage.setItem('wb-view', JSON.stringify(view)); } catch (e) {}
+}
+function loadView() {
+  try {
+    const v = JSON.parse(localStorage.getItem('wb-view'));
+    if (v && v.z > 0 && isFinite(v.x) && isFinite(v.y)) return v;
+  } catch (e) {}
+  return { x: 0, y: 0, z: 1 };
+}
+
+// ---------- zoom & pan ----------
+function toBoard(sx, sy) {
+  return { x: (sx - view.x) / view.z, y: (sy - view.y) / view.z };
+}
+// Zoom so the board point under (sx, sy) stays under the cursor
+function zoomAt(sx, sy, factor) {
+  const z = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, view.z * factor));
+  const p = toBoard(sx, sy);
+  view = { x: sx - p.x * z, y: sy - p.y * z, z };
+  viewChanged();
+}
+function panBy(dx, dy) {
+  view = { ...view, x: view.x + dx, y: view.y + dy };
+  viewChanged();
+}
+function viewChanged() {
+  placeEditor();
+  saveView();
+  render();
+}
+// passive: false so we can stop the browser's own page zoom
+addEventListener('wheel', e => {
+  if (!e.ctrlKey && !e.metaKey) return;
+  e.preventDefault();
+  let dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY; // lines -> pixels
+  dy = Math.max(-100, Math.min(100, dy));
+  zoomAt(e.clientX, e.clientY, Math.exp(-dy * 0.002));
+}, { passive: false });
 
 // ---------- drawing ----------
 function resize() {
@@ -179,7 +227,6 @@ function resize() {
   cv.height = innerHeight * dpr;
   cv.style.width = innerWidth + 'px';
   cv.style.height = innerHeight + 'px';
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   draw();
 }
 
@@ -189,7 +236,10 @@ function render() {
 }
 function draw() {
   queued = false;
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, innerWidth, innerHeight);
+  ctx.setTransform(dpr * view.z, 0, 0, dpr * view.z, dpr * view.x, dpr * view.y);
   for (const it of items) drawItem(ctx, it, it === hover ? 0.8 : 1);
   if (drawing) drawItem(ctx, drawing, 1);
 }
@@ -389,10 +439,11 @@ function segDist(x, y, a, b) {
   return Math.hypot(x - (a[0] + t * dx), y - (a[1] + t * dy));
 }
 function hit(it, x, y) {
+  const pad = 6 / view.z; // same reach on screen at any zoom
   if (it.type === 'text') {
-    return x >= it.x - 6 && x <= it.x + it.w + 6 && y >= it.y - 6 && y <= it.y + it.h + 6;
+    return x >= it.x - pad && x <= it.x + it.w + pad && y >= it.y - pad && y <= it.y + it.h + pad;
   }
-  const r = it.width / 2 + 6, p = it.pts;
+  const r = it.width / 2 + pad, p = it.pts;
   if (p.length === 1) return Math.hypot(x - p[0][0], y - p[0][1]) <= r;
   for (let i = 1; i < p.length; i++) if (segDist(x, y, p[i - 1], p[i]) <= r) return true;
   return false;
@@ -406,7 +457,7 @@ function itemAt(p, type) {
 }
 // Remove every item touched along the path from a to b
 function eraseAlong(a, b) {
-  const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 4));
+  const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) * view.z / 4));
   for (let i = 0; i <= n; i++) {
     const x = a.x + (b.x - a.x) * i / n, y = a.y + (b.y - a.y) * i / n;
     items = items.filter(it => !hit(it, x, y));
@@ -425,13 +476,19 @@ function openEditor(x, y, existing) {
   }
   editing = { x, y, before };
   ta.value = existing ? existing.text : '';
-  ta.style.left = x + 'px';
-  ta.style.top = (y - PAD) + 'px';
+  placeEditor();
   ta.style.color = color;
   ta.hidden = false;
   fitEditor();
   ta.focus();
   render();
+}
+// Put the text box over its board position; it is sized in board units and scaled to the zoom
+function placeEditor() {
+  if (!editing) return;
+  ta.style.left = (editing.x * view.z + view.x) + 'px';
+  ta.style.top = ((editing.y - PAD) * view.z + view.y) + 'px';
+  ta.style.transform = `scale(${view.z})`;
 }
 function fitEditor() {
   ctx.font = FONT;
@@ -461,13 +518,20 @@ ta.addEventListener('input', fitEditor);
 ta.addEventListener('blur', commitEditor);
 
 // ---------- pointer input ----------
-function pos(e) { return { x: e.clientX, y: e.clientY }; }
+function pos(e) { return toBoard(e.clientX, e.clientY); }
 
 cv.addEventListener('contextmenu', e => e.preventDefault());
 cv.addEventListener('mousedown', e => e.preventDefault()); // don't steal focus from the text box
 
 cv.addEventListener('pointerdown', e => {
   if (pointerId !== null) return;
+  if (spaceDown) {
+    pointerId = e.pointerId;
+    cv.setPointerCapture(e.pointerId);
+    panning = { x: e.clientX, y: e.clientY };
+    updateBar();
+    return;
+  }
   const p = pos(e);
   // Right button or stylus eraser end always erases
   const eraser = mode === 'eraser' || e.button === 2 || e.button === 5;
@@ -512,6 +576,11 @@ cv.addEventListener('pointermove', e => {
     }
     return;
   }
+  if (panning) {
+    panBy(e.clientX - panning.x, e.clientY - panning.y);
+    panning = { x: e.clientX, y: e.clientY };
+    return;
+  }
   const evs = (e.getCoalescedEvents && e.getCoalescedEvents().length) ? e.getCoalescedEvents() : [e];
   for (const ev of evs) {
     const p = pos(ev);
@@ -525,9 +594,14 @@ cv.addEventListener('pointermove', e => {
 function endPointer(e) {
   if (e.pointerId !== pointerId) return;
   pointerId = null;
+  if (panning) {
+    panning = null;
+    updateBar();
+  }
   if (drawing?.anchor) {
     const [[x1, y1], , [x2, y2]] = drawing.pts;
-    if (Math.abs(x2 - x1) > 4 || Math.abs(y2 - y1) > 4) { // ignore stray clicks
+    const min = 4 / view.z; // ignore stray clicks (4 screen px)
+    if (Math.abs(x2 - x1) > min || Math.abs(y2 - y1) > min) {
       pushHistory(items.slice());
       const { anchor, ...rect } = drawing;
       items.push(rect);
@@ -539,10 +613,13 @@ function endPointer(e) {
     items.push(drawing);
     lastTool = 'pen';
     // A snapped box is its own undo step, so Ctrl+Z brings back the hand-drawn line
-    const rect = detectRect(drawing.pts);
+    // Judge the shape at its on-screen size, since the limits are tuned to hand movement
+    const z = view.z;
+    const rect = detectRect(drawing.pts.map(([x, y]) => [x * z, y * z]));
     if (rect) {
       pushHistory(items.slice());
-      items[items.length - 1] = { ...drawing, pts: rect, shape: 'rect', raw: drawing.pts };
+      const pts = rect.map(([x, y]) => [x / z, y / z]);
+      items[items.length - 1] = { ...drawing, pts, shape: 'rect', raw: drawing.pts };
     }
     drawing = null;
   }
@@ -567,6 +644,11 @@ addEventListener('keydown', e => {
     }
     return;
   }
+  if (e.code === 'Space') {
+    e.preventDefault();
+    if (!spaceDown) { spaceDown = true; updateBar(); }
+    return;
+  }
   const mod = e.ctrlKey || e.metaKey;
   const k = e.key.toLowerCase();
   if (mod && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
@@ -589,6 +671,11 @@ addEventListener('keydown', e => {
   else if (k === 'a') toggleArrow();
   else if (e.key === '?') help.classList.toggle('hide');
 });
+function releaseSpace() {
+  if (spaceDown) { spaceDown = false; updateBar(); }
+}
+addEventListener('keyup', e => { if (e.code === 'Space') releaseSpace(); });
+addEventListener('blur', releaseSpace); // keyup is missed if the window loses focus
 
 // ---------- export ----------
 function exportPng() {
@@ -600,6 +687,8 @@ function exportPng() {
   c.scale(dpr, dpr);
   c.fillStyle = '#fff';
   c.fillRect(0, 0, innerWidth, innerHeight);
+  // Export what is currently on screen
+  c.setTransform(dpr * view.z, 0, 0, dpr * view.z, dpr * view.x, dpr * view.y);
   items.forEach(it => drawItem(c, it, 1));
   const a = document.createElement('a');
   a.download = 'whiteboard.png';
