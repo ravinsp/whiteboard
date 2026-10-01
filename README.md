@@ -30,7 +30,9 @@ Then go to <http://localhost:8000>.
   - Undo once to get your hand-drawn line back.
 - **Arrow heads**: press `A` to add an arrow head to the end of the line you just drew with the pen.
   - If that line had snapped into a box, it goes back to your drawn line first.
-- **Undo / redo**, **PNG export**, and **auto-save**: the drawing is kept in the browser's local storage and survives a refresh.
+- **Zoom and pan**: `Ctrl` + mouse wheel zooms around the cursor (a trackpad pinch works too); hold `Space` and drag to move around the board.
+- **Undo / redo**, **PNG export**, and **auto-save**: the drawing and the current view are kept in the browser's local storage and survive a refresh.
+  - PNG export saves what is currently on screen.
 
 ## Keyboard shortcuts
 
@@ -54,6 +56,8 @@ Then go to <http://localhost:8000>.
 | Left-drag | Use the current tool |
 | Right-drag | Erase, with any tool selected |
 | `Shift` + drag (rectangle tool) | Draw a square |
+| `Ctrl` + wheel | Zoom in / out around the cursor |
+| `Space` + drag | Pan around the board |
 
 ## Notes
 
